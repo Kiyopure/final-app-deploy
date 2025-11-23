@@ -1,6 +1,5 @@
-# メモリ最適化版 requirements.txt (Streamlit Cloud対応)
-streamlit==1.41.1
-openai==2.8.0
-PyPDF2==3.0.1
-python-docx==1.1.2
-typing-extensions>=4.0.0
+# 最小限の依存関係 (Streamlit Cloud最適化)
+streamlit
+openai
+pypdf
+python-docx

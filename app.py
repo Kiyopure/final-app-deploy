@@ -1,20 +1,8 @@
 import streamlit as st
 import os
 from datetime import datetime
-import json
 from pathlib import Path
 import re
-
-# PDFとDOCX処理用
-try:
-    from PyPDF2 import PdfReader
-except ImportError:
-    PdfReader = None
-
-try:
-    from docx import Document
-except ImportError:
-    Document = None
 
 # OpenAI API
 try:
@@ -23,14 +11,38 @@ except ImportError:
     OpenAI = None
 
 
-class LightweightKnowledgeBase:
-    """軽量版社内情報ナレッジベース管理クラス（メモリ最適化版）"""
+# 遅延インポート: 必要な時だけロード
+def get_pdf_reader():
+    """pypdfを遅延ロード (PyPDF2の後継)"""
+    try:
+        from pypdf import PdfReader
+        return PdfReader
+    except ImportError:
+        try:
+            from PyPDF2 import PdfReader
+            return PdfReader
+        except ImportError:
+            return None
+
+
+def get_docx_document():
+    """Document (python-docx)を遅延ロード"""
+    try:
+        from docx import Document
+        return Document
+    except ImportError:
+        return None
+
+
+class OptimizedKnowledgeBase:
+    """メモリ最適化版ナレッジベース（PDF/DOCX/TXT対応）"""
     
     def __init__(self):
         self.documents = []
     
     def extract_text_from_pdf(self, file_path):
-        """PDFからテキストを抽出"""
+        """PDFからテキストを抽出（遅延ロード）"""
+        PdfReader = get_pdf_reader()
         if not PdfReader:
             return "PDFライブラリがインストールされていません"
         
@@ -44,7 +56,8 @@ class LightweightKnowledgeBase:
             return f"PDF読み込みエラー: {str(e)}"
     
     def extract_text_from_docx(self, file_path):
-        """DOCXからテキストを抽出"""
+        """DOCXからテキストを抽出（遅延ロード）"""
+        Document = get_docx_document()
         if not Document:
             return "DOCXライブラリがインストールされていません"
         
@@ -70,8 +83,7 @@ class LightweightKnowledgeBase:
             return f"ファイル読み込みエラー: {str(e)}"
     
     def add_document(self, file_path, file_name):
-        """文書をデータベースに追加（シンプルなテキスト保存）"""
-        # ファイルタイプに応じてテキストを抽出
+        """文書をデータベースに追加"""
         ext = Path(file_path).suffix.lower()
         
         if ext == '.pdf':
@@ -225,6 +237,14 @@ def load_sample_documents(knowledge_base):
     return count
 
 
+@st.cache_resource
+def get_knowledge_base():
+    """ナレッジベースをキャッシュして再利用"""
+    kb = OptimizedKnowledgeBase()
+    load_sample_documents(kb)
+    return kb
+
+
 def main():
     st.set_page_config(
         page_title="社内情報特化型AI検索",
@@ -232,16 +252,14 @@ def main():
         layout="wide"
     )
     
-    st.title("🏢 社内情報特化型AI検索システム (軽量版)")
+    st.title("🏢 社内情報特化型AI検索システム (最適化版)")
     st.markdown("---")
     
     # セッション状態の初期化
     if 'knowledge_base' not in st.session_state:
-        st.session_state.knowledge_base = LightweightKnowledgeBase()
-        # サンプル文書を自動読み込み
-        loaded_count = load_sample_documents(st.session_state.knowledge_base)
-        if loaded_count > 0:
-            st.session_state.sample_loaded = True
+        # キャッシュされたナレッジベースを使用
+        st.session_state.knowledge_base = get_knowledge_base()
+        st.session_state.sample_loaded = True
     
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
@@ -403,13 +421,14 @@ def main():
     4. AIが社内文書を参照して回答を生成
     
     ### 💡 特徴
-    - **軽量版**: メモリ使用量を最小化（Streamlit Cloud対応）
-    - **キーワード検索**: シンプルで高速な検索
+    - **メモリ最適化**: Streamlit Cloud対応
+    - **遅延ロード**: 必要な時だけライブラリを読み込み
+    - **キャッシュ機能**: 文書の再読み込みを防止
     - **サンプル文書**: 自動的に`sample_documents`フォルダから読み込み
     
     ### ⚠️ 注意事項
     - OpenAI APIキーが必要です（GPT-4を使用）
-    - 軽量版のため、ベクトル検索ではなくキーワード検索を使用
+    - PDF, DOCX, TXTファイルに対応
     """)
 
 
