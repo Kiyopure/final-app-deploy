@@ -1,3 +1,2 @@
-# 超シンプル版 - 確実に動作する最小構成
 streamlit
 openai
