@@ -11,11 +11,60 @@ except ImportError:
     OpenAI = None
 
 
+# 遅延ロード関数
+@st.cache_resource
+def get_pdf_reader():
+    """pypdfを遅延ロード"""
+    try:
+        from pypdf import PdfReader
+        return PdfReader
+    except ImportError:
+        return None
+
+
+@st.cache_resource
+def get_docx_document():
+    """python-docxを遅延ロード"""
+    try:
+        from docx import Document
+        return Document
+    except ImportError:
+        return None
+
+
 class SimpleKnowledgeBase:
-    """シンプル版ナレッジベース（TXTのみ）"""
+    """シンプル版ナレッジベース（PDF/DOCX/TXT対応）"""
     
     def __init__(self):
         self.documents = []
+    
+    def extract_text_from_pdf(self, file_path):
+        """PDFからテキストを抽出"""
+        PdfReader = get_pdf_reader()
+        if not PdfReader:
+            return "PDFライブラリがインストールされていません"
+        
+        try:
+            reader = PdfReader(file_path)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+        except Exception as e:
+            return f"PDF読み込みエラー: {str(e)}"
+    
+    def extract_text_from_docx(self, file_path):
+        """DOCXからテキストを抽出"""
+        Document = get_docx_document()
+        if not Document:
+            return "DOCXライブラリがインストールされていません"
+        
+        try:
+            doc = Document(file_path)
+            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            return text
+        except Exception as e:
+            return f"DOCX読み込みエラー: {str(e)}"
     
     def extract_text_from_txt(self, file_path):
         """TXTファイルからテキストを抽出"""
@@ -32,13 +81,20 @@ class SimpleKnowledgeBase:
             return f"ファイル読み込みエラー: {str(e)}"
     
     def add_document(self, file_path, file_name):
-        """文書をデータベースに追加（TXTのみ）"""
+        """文書をデータベースに追加（PDF/DOCX/TXT対応）"""
         ext = Path(file_path).suffix.lower()
         
-        if ext != '.txt':
-            return False, "現在TXTファイルのみ対応しています"
+        if ext == '.pdf':
+            text = self.extract_text_from_pdf(file_path)
+        elif ext == '.docx':
+            text = self.extract_text_from_docx(file_path)
+        elif ext == '.txt':
+            text = self.extract_text_from_txt(file_path)
+        else:
+            return False, "サポートされていないファイル形式です"
         
-        text = self.extract_text_from_txt(file_path)
+        if not text or text.startswith("エラー") or text.startswith("ライブラリ"):
+            return False, text
         
         # 文書をチャンクに分割 (約500文字ごと)
         chunks = self._split_text(text, chunk_size=500)
@@ -164,16 +220,17 @@ class CompanyAIAssistant:
 
 
 def load_sample_documents(knowledge_base):
-    """sample_documentsフォルダから文書を自動読み込み（TXTのみ）"""
+    """sample_documentsフォルダから文書を自動読み込み（PDF/DOCX/TXT）"""
     sample_dir = Path("./sample_documents")
     if not sample_dir.exists():
         return 0
     
     count = 0
-    for file_path in sample_dir.glob("*.txt"):
-        success, _ = knowledge_base.add_document(str(file_path), file_path.name)
-        if success:
-            count += 1
+    for file_path in sample_dir.glob("*"):
+        if file_path.suffix.lower() in ['.txt', '.pdf', '.docx']:
+            success, _ = knowledge_base.add_document(str(file_path), file_path.name)
+            if success:
+                count += 1
     
     return count
 
@@ -193,7 +250,7 @@ def main():
         layout="wide"
     )
     
-    st.title("🏢 社内情報特化型AI検索システム (シンプル版)")
+    st.title("🏢 社内情報特化型AI検索システム")
     st.markdown("---")
     
     # セッション状態の初期化
@@ -237,10 +294,10 @@ def main():
         
         # ファイルアップロード
         uploaded_files = st.file_uploader(
-            "社内文書をアップロード (TXTのみ)",
-            type=['txt'],
+            "社内文書をアップロード",
+            type=['pdf', 'docx', 'txt'],
             accept_multiple_files=True,
-            help="現在TXTファイルのみ対応しています"
+            help="PDF, DOCX, TXTファイルに対応しています"
         )
         
         if uploaded_files:
@@ -357,20 +414,19 @@ def main():
     st.markdown("""
     ### 📖 使い方
     1. **サイドバー**からOpenAI APIキーを設定
-    2. 社内文書（TXTファイル）をアップロードして追加
+    2. 社内文書（PDF/DOCX/TXT）をアップロードして追加
     3. チャット欄で質問を入力して検索
     4. AIが社内文書を参照して回答を生成
     
     ### 💡 特徴
-    - **超シンプル**: 依存関係を最小化（Streamlit + OpenAIのみ）
-    - **確実に動作**: TXTファイル専用
+    - **PDF/DOCX/TXT対応**: 遅延ロードで効率的に処理
+    - **キャッシュ機能**: メモリ使用を最適化
     - **キーワード検索**: 高速で軽量
     - **サンプル文書**: 自動的に`sample_documents`フォルダから読み込み
     
     ### ⚠️ 注意事項
     - OpenAI APIキーが必要です（GPT-4を使用）
-    - 現在TXTファイルのみ対応
-    - PDF/DOCXを使いたい場合は、テキストに変換してからアップロードしてください
+    - PDF, DOCX, TXTファイルに対応
     """)
 
 
