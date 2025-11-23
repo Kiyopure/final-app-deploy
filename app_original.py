@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 import json
 from pathlib import Path
-import re
+import hashlib
 
 # PDFとDOCX処理用
 try:
@@ -22,12 +22,46 @@ try:
 except ImportError:
     OpenAI = None
 
+# ベクトルデータベース (ChromaDB)
+try:
+    import chromadb
+    from chromadb.config import Settings
+except ImportError:
+    chromadb = None
 
-class LightweightKnowledgeBase:
-    """軽量版社内情報ナレッジベース管理クラス（メモリ最適化版）"""
+# 埋め込み用
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
+
+
+class CompanyKnowledgeBase:
+    """社内情報ナレッジベース管理クラス"""
     
-    def __init__(self):
+    def __init__(self, persist_directory="./company_db"):
+        self.persist_directory = persist_directory
         self.documents = []
+        
+        # ChromaDBクライアントの初期化
+        if chromadb:
+            self.chroma_client = chromadb.Client(Settings(
+                persist_directory=persist_directory,
+                anonymized_telemetry=False
+            ))
+            try:
+                self.collection = self.chroma_client.get_collection("company_docs")
+            except:
+                self.collection = self.chroma_client.create_collection("company_docs")
+        else:
+            self.chroma_client = None
+            self.collection = None
+            
+        # 埋め込みモデルの初期化
+        if SentenceTransformer:
+            self.embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+        else:
+            self.embedding_model = None
     
     def extract_text_from_pdf(self, file_path):
         """PDFからテキストを抽出"""
@@ -70,7 +104,7 @@ class LightweightKnowledgeBase:
             return f"ファイル読み込みエラー: {str(e)}"
     
     def add_document(self, file_path, file_name):
-        """文書をデータベースに追加（シンプルなテキスト保存）"""
+        """文書をデータベースに追加"""
         # ファイルタイプに応じてテキストを抽出
         ext = Path(file_path).suffix.lower()
         
@@ -89,11 +123,29 @@ class LightweightKnowledgeBase:
         # 文書をチャンクに分割 (約500文字ごと)
         chunks = self._split_text(text, chunk_size=500)
         
-        # メモリに保存
+        # ChromaDBに保存
+        if self.collection and self.embedding_model:
+            doc_id = hashlib.md5(file_name.encode()).hexdigest()
+            
+            for i, chunk in enumerate(chunks):
+                chunk_id = f"{doc_id}_{i}"
+                embedding = self.embedding_model.encode(chunk).tolist()
+                
+                self.collection.add(
+                    embeddings=[embedding],
+                    documents=[chunk],
+                    metadatas=[{
+                        "file_name": file_name,
+                        "chunk_id": i,
+                        "timestamp": datetime.now().isoformat()
+                    }],
+                    ids=[chunk_id]
+                )
+        
+        # メタデータを保存
         self.documents.append({
             "file_name": file_name,
-            "chunks": chunks,
-            "full_text": text,
+            "chunks": len(chunks),
             "timestamp": datetime.now().isoformat(),
             "text_preview": text[:200]
         })
@@ -120,39 +172,25 @@ class LightweightKnowledgeBase:
         return chunks
     
     def search(self, query, top_k=3):
-        """クエリに関連する文書を検索（キーワードベース）"""
-        if not self.documents:
+        """クエリに関連する文書を検索"""
+        if not self.collection or not self.embedding_model:
             return []
         
-        # キーワード抽出（簡易版）
-        keywords = re.findall(r'\w+', query.lower())
-        
-        results = []
-        for doc in self.documents:
-            for chunk in doc['chunks']:
-                score = sum(1 for keyword in keywords if keyword in chunk.lower())
-                if score > 0:
-                    results.append({
-                        'text': chunk,
-                        'score': score,
-                        'file_name': doc['file_name']
-                    })
-        
-        # スコアでソート
-        results.sort(key=lambda x: x['score'], reverse=True)
-        
-        # 上位K件を返す
-        top_results = results[:top_k]
-        return [r['text'] for r in top_results] if top_results else []
+        try:
+            query_embedding = self.embedding_model.encode(query).tolist()
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=top_k
+            )
+            
+            return results
+        except Exception as e:
+            st.error(f"検索エラー: {str(e)}")
+            return []
     
     def get_document_list(self):
         """登録されている文書のリストを取得"""
-        return [{
-            'file_name': doc['file_name'],
-            'chunks': len(doc['chunks']),
-            'timestamp': doc['timestamp'],
-            'text_preview': doc['text_preview']
-        } for doc in self.documents]
+        return self.documents
 
 
 class CompanyAIAssistant:
@@ -209,22 +247,6 @@ class CompanyAIAssistant:
             return f"回答生成エラー: {str(e)}"
 
 
-def load_sample_documents(knowledge_base):
-    """sample_documentsフォルダから文書を自動読み込み"""
-    sample_dir = Path("./sample_documents")
-    if not sample_dir.exists():
-        return 0
-    
-    count = 0
-    for file_path in sample_dir.glob("*"):
-        if file_path.suffix.lower() in ['.txt', '.pdf', '.docx']:
-            success, _ = knowledge_base.add_document(str(file_path), file_path.name)
-            if success:
-                count += 1
-    
-    return count
-
-
 def main():
     st.set_page_config(
         page_title="社内情報特化型AI検索",
@@ -232,16 +254,12 @@ def main():
         layout="wide"
     )
     
-    st.title("🏢 社内情報特化型AI検索システム (軽量版)")
+    st.title("🏢 社内情報特化型AI検索システム")
     st.markdown("---")
     
     # セッション状態の初期化
     if 'knowledge_base' not in st.session_state:
-        st.session_state.knowledge_base = LightweightKnowledgeBase()
-        # サンプル文書を自動読み込み
-        loaded_count = load_sample_documents(st.session_state.knowledge_base)
-        if loaded_count > 0:
-            st.session_state.sample_loaded = True
+        st.session_state.knowledge_base = CompanyKnowledgeBase()
     
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
@@ -251,30 +269,17 @@ def main():
         st.header("⚙️ 設定")
         
         # OpenAI APIキー入力
-        api_key_input = st.text_input(
+        api_key = st.text_input(
             "OpenAI APIキー",
             type="password",
-            help="GPT-4を使用するためのAPIキーを入力してください",
-            value=st.session_state.get('api_key', '')
+            help="GPT-4を使用するためのAPIキーを入力してください"
         )
         
-        # Streamlit Cloudのsecretsからも取得を試みる
-        if not api_key_input:
-            try:
-                api_key_input = st.secrets["openai"]["api_key"]
-                st.success("✅ APIキーを検出しました")
-            except:
-                pass
-        
-        if api_key_input:
-            st.session_state.api_key = api_key_input
+        if api_key:
+            st.session_state.api_key = api_key
         
         st.markdown("---")
         st.header("📚 文書管理")
-        
-        # サンプル文書読み込み状態の表示
-        if st.session_state.get('sample_loaded'):
-            st.info("📂 サンプル文書を自動読み込みしました")
         
         # ファイルアップロード
         uploaded_files = st.file_uploader(
@@ -339,8 +344,8 @@ def main():
                 st.markdown(f"**🤖 AI:** {message['content']}")
                 if 'sources' in message:
                     with st.expander("📚 参考にした文書"):
-                        for i, source in enumerate(message['sources']):
-                            st.text(f"--- 参考{i+1} ---\n{source}\n")
+                        for source in message['sources']:
+                            st.text(source)
             st.markdown("---")
     
     # 質問入力
@@ -366,9 +371,9 @@ def main():
         else:
             with st.spinner("検索中..."):
                 # 関連文書を検索
-                context_docs = st.session_state.knowledge_base.search(question, top_k=3)
+                results = st.session_state.knowledge_base.search(question, top_k=3)
                 
-                if context_docs:
+                if results and results.get('documents') and results['documents'][0]:
                     # AIアシスタントを初期化
                     assistant = CompanyAIAssistant(
                         st.session_state.knowledge_base,
@@ -376,6 +381,7 @@ def main():
                     )
                     
                     # 回答を生成
+                    context_docs = results['documents'][0]
                     answer = assistant.generate_answer(question, context_docs)
                     
                     # チャット履歴に追加
@@ -402,16 +408,14 @@ def main():
     3. チャット欄で質問を入力して検索
     4. AIが社内文書を参照して回答を生成
     
-    ### 💡 特徴
-    - **軽量版**: メモリ使用量を最小化（Streamlit Cloud対応）
-    - **キーワード検索**: シンプルで高速な検索
-    - **サンプル文書**: 自動的に`sample_documents`フォルダから読み込み
-    
-    ### ⚠️ 注意事項
+    ### 💡 注意事項
     - OpenAI APIキーが必要です（GPT-4を使用）
-    - 軽量版のため、ベクトル検索ではなくキーワード検索を使用
+    - 初回実行時に必要なライブラリのインストールが必要な場合があります
+    - 文書は自動的にベクトル化され、セマンティック検索が可能になります
     """)
 
 
 if __name__ == "__main__":
+    # 必要なディレクトリを作成
+    os.makedirs("./company_db", exist_ok=True)
     main()
